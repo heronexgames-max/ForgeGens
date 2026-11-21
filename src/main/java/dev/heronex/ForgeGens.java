@@ -3,11 +3,10 @@ package dev.heronex;
 import java.util.*;
 import org.bukkit.*;
 import org.bukkit.block.Block;
- import org.bukkit.command.*;
+import org.bukkit.command.*;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.block.*;
- import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -59,6 +58,7 @@ public final class ForgeGens extends JavaPlugin implements Listener {
     }
 
     private void accrue(String key, long now) {
+        if (getConfig().getBoolean(key + ".paused")) return;
         Blueprint type = blueprint(key);
         long last = getConfig().getLong(key + ".lastProduced", now);
         if (last > now || !getConfig().contains(key + ".lastProduced")) {
@@ -81,12 +81,85 @@ public final class ForgeGens extends JavaPlugin implements Listener {
         getConfig().set(key + ".audit", entries);
     }
 
+    private record NetworkForge(String key, int x, int y, int z, double distanceSquared) {}
+
+    private List<NetworkForge> nearbyForges(Player player) {
+        var config = getConfig().getConfigurationSection("forges");
+        if (config == null) return List.of();
+        String playerId = player.getUniqueId().toString();
+        String worldId = player.getWorld().getUID().toString();
+        Location position = player.getLocation();
+        List<NetworkForge> nearby = new ArrayList<>();
+        for (String id : config.getKeys(false)) {
+            String[] chunks = id.split("_");
+            if (chunks.length != 4 || !worldId.equals(chunks[0])) continue;
+            if (!playerId.equals(config.getString(id + ".owner"))
+                    && !config.getStringList(id + ".members").contains(playerId)) continue;
+            try {
+                int x = Integer.parseInt(chunks[1]);
+                int y = Integer.parseInt(chunks[2]);
+                int z = Integer.parseInt(chunks[3]);
+                double distance = position.distanceSquared(new Location(player.getWorld(), x + .5, y + .5, z + .5));
+                if (distance <= 32 * 32) nearby.add(new NetworkForge("forges." + id, x, y, z, distance));
+            } catch (NumberFormatException invalid) {
+                getLogger().warning("Skipping invalid forge coordinates: " + id);
+            }
+        }
+        nearby.sort(Comparator.comparingDouble(NetworkForge::distanceSquared).thenComparing(NetworkForge::key));
+        return nearby;
+    }
+
+    private int collect(Player player, String key) {
+        Material material = blueprint(key).output;
+        int stored = getConfig().getInt(key + ".stored");
+        int remaining = stored;
+        while (remaining > 0) {
+            int stackSize = Math.min(material.getMaxStackSize(), remaining);
+            int overflow = player.getInventory().addItem(new ItemStack(material, stackSize))
+                .values().stream().mapToInt(ItemStack::getAmount).sum();
+            remaining -= stackSize - overflow;
+            if (overflow > 0) break;
+        }
+        int collected = stored - remaining;
+        if (collected > 0) {
+            getConfig().set(key + ".stored", remaining);
+            audit(key, player, "collected " + collected + " " + material);
+        }
+        return collected;
+    }
+
+    private void network(Player player, boolean collectAll) {
+        List<NetworkForge> nearby = nearbyForges(player);
+        if (nearby.isEmpty()) {
+            player.sendMessage("No accessible forges within 32 blocks.");
+            return;
+        }
+        var totals = new EnumMap<Material, Integer>(Material.class);
+        long now = System.currentTimeMillis();
+        for (NetworkForge forge : nearby) {
+            World world = player.getWorld();
+            if (!world.isChunkLoaded(forge.x >> 4, forge.z >> 4)
+                    || world.getBlockAt(forge.x, forge.y, forge.z).getType() != ANCHOR) continue;
+            accrue(forge.key, now);
+            int amount = collectAll ? collect(player, forge.key) : getConfig().getInt(forge.key + ".stored");
+            if (amount > 0) totals.merge(blueprint(forge.key).output, amount, Integer::sum);
+        }
+        if (collectAll) saveConfig();
+        player.sendMessage((collectAll ? "Network collected: " : "Network ready: ")
+            + (totals.isEmpty() ? "no items" : totals));
+    }
+
     @Override public void onDisable() { saveConfig(); }
 
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!(sender instanceof Player player)) return true;
         if (args.length == 0 || args.length > 2) {
-            player.sendMessage("/forge register [standard|rapid|vault], claim, status, collect, upgrade, grant <player>, revoke <player>, audit, remove");
+            player.sendMessage("/forge register [standard|rapid|vault], claim, status, collect, upgrade, grant <player>, revoke <player>, audit, pause, resume, network, collectall, remove");
+            return true;
+        }
+        String action = args[0].toLowerCase(Locale.ROOT);
+        if (args.length == 1 && Set.of("network", "collectall").contains(action)) {
+            network(player, action.equals("collectall"));
             return true;
         }
         Block block = player.getTargetBlockExact(5);
@@ -95,7 +168,6 @@ public final class ForgeGens extends JavaPlugin implements Listener {
             return true;
         }
         String key = key(block);
-        String action = args[0].toLowerCase(Locale.ROOT);
         String id = player.getUniqueId().toString();
         if (args.length == 2 && !Set.of("register", "grant", "revoke").contains(action)) return false;
         if (action.equals("register") || action.equals("remove")) {
@@ -168,22 +240,23 @@ public final class ForgeGens extends JavaPlugin implements Listener {
         int level = getConfig().getInt(key + ".level");
         int stored = getConfig().getInt(key + ".stored");
         switch (action) {
-            case "status" -> player.sendMessage(type + " | Level " + level + " | " + stored + "/" + (type.capacity * level) + " " + type.output);
+            case "status" -> player.sendMessage(type + " | Level " + level + " | " + stored + "/" + (type.capacity * level) + " " + type.output
+                + (getConfig().getBoolean(key + ".paused") ? " | Paused" : ""));
             case "audit" -> getConfig().getStringList(key + ".audit").forEach(player::sendMessage);
             case "collect" -> {
-                if (stored == 0) { player.sendMessage("The forge is empty."); break; }
-                int remaining = stored;
-                while (remaining > 0) {
-                    int stackSize = Math.min(type.output.getMaxStackSize(), remaining);
-                    int overflow = player.getInventory().addItem(new ItemStack(type.output, stackSize))
-                        .values().stream().mapToInt(ItemStack::getAmount).sum();
-                    remaining -= stackSize - overflow;
-                    if (overflow > 0) break;
-                }
-                getConfig().set(key + ".stored", remaining);
-                if (stored != remaining) audit(key, player, "collected " + (stored - remaining) + " " + type.output);
+                int collected = collect(player, key);
                 saveConfig();
-                player.sendMessage("Collected " + (stored - remaining) + " " + type.output + ".");
+                player.sendMessage("Collected " + collected + " " + type.output + ".");
+            }
+            case "pause", "resume" -> {
+                boolean paused = action.equals("pause");
+                if (paused != getConfig().getBoolean(key + ".paused")) {
+                    getConfig().set(key + ".paused", paused);
+                    getConfig().set(key + ".lastProduced", System.currentTimeMillis());
+                    audit(key, player, action);
+                    saveConfig();
+                }
+                player.sendMessage(paused ? "Production paused." : "Production resumed.");
             }
             case "upgrade" -> {
                 if (level >= MAX_LEVEL) { player.sendMessage("Maximum level reached."); break; }

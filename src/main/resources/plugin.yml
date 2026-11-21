@@ -1,5 +1,5 @@
 name: ForgeGens
-version: '2.0.0'
+version: '2.1.0'
 main: dev.heronex.ForgeGens
 api-version: '1.21.11'
 description: Claim and upgrade resource generators
