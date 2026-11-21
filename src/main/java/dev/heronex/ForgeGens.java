@@ -42,6 +42,55 @@ public final class ForgeGens extends JavaPlugin implements Listener {
         }
     }
 
+    private enum Module {
+        NONE(100, 1, null, 0),
+        OVERCLOCK(75, 1, Material.REDSTONE_BLOCK, 8),
+        RESERVOIR(100, 2, Material.COPPER_BLOCK, 8);
+
+        final int intervalPercent;
+        final int capacityMultiplier;
+        final Material cost;
+        final int price;
+
+        Module(int intervalPercent, int capacityMultiplier, Material cost, int price) {
+            this.intervalPercent = intervalPercent;
+            this.capacityMultiplier = capacityMultiplier;
+            this.cost = cost;
+            this.price = price;
+        }
+    }
+
+    private Module module(String key) {
+        return Module.valueOf(getConfig().getString(key + ".module", "NONE"));
+    }
+
+    private void installModule(Player player, String key, String selection, int level) {
+        Module selected = switch (selection.toLowerCase(Locale.ROOT)) {
+            case "overclock" -> Module.OVERCLOCK;
+            case "reservoir" -> Module.RESERVOIR;
+            default -> Module.NONE;
+        };
+        if (selected == Module.NONE) {
+            player.sendMessage("Use /forge module <overclock|reservoir>.");
+            return;
+        }
+        if (level < 3 || module(key) != Module.NONE) {
+            player.sendMessage("A level-three forge with an empty module slot is required.");
+            return;
+        }
+        ItemStack cost = new ItemStack(selected.cost, selected.price);
+        if (!player.getInventory().containsAtLeast(cost, selected.price)) {
+            player.sendMessage("Installation requires " + selected.price + " " + selected.cost + ".");
+            return;
+        }
+        player.getInventory().removeItem(cost);
+        getConfig().set(key + ".module", selected.name());
+        getConfig().set(key + ".lastProduced", System.currentTimeMillis());
+        audit(key, player, "installed " + selected);
+        saveConfig();
+        player.sendMessage("Installed " + selected + ". This forge's module choice is permanent.");
+    }
+
     private Blueprint blueprint(String key) {
         return Blueprint.valueOf(getConfig().getString(key + ".blueprint", "STANDARD"));
     }
@@ -68,10 +117,12 @@ public final class ForgeGens extends JavaPlugin implements Listener {
         int level = getConfig().getInt(key + ".level", 1);
         int stored = getConfig().getInt(key + ".stored");
         long elapsed = now - last;
-        long cycles = Math.min(elapsed, 43_200_000L) / type.interval;
+        Module module = module(key);
+        long interval = type.interval * module.intervalPercent / 100;
+        long cycles = Math.min(elapsed, 43_200_000L) / interval;
         if (cycles == 0) return;
-        getConfig().set(key + ".stored", (int) Math.min(type.capacity * level, stored + cycles * level * type.rate));
-        getConfig().set(key + ".lastProduced", now - elapsed % type.interval);
+        getConfig().set(key + ".stored", (int) Math.min(type.capacity * level * module.capacityMultiplier, stored + cycles * level * type.rate));
+        getConfig().set(key + ".lastProduced", now - elapsed % interval);
     }
 
     private void audit(String key, Player player, String action) {
@@ -154,7 +205,7 @@ public final class ForgeGens extends JavaPlugin implements Listener {
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!(sender instanceof Player player)) return true;
         if (args.length == 0 || args.length > 2) {
-            player.sendMessage("/forge register [standard|rapid|vault], claim, status, collect, upgrade, grant <player>, revoke <player>, audit, pause, resume, network, collectall, remove");
+            player.sendMessage("/forge register [standard|rapid|vault], claim, status, collect, upgrade, module <type>, grant <player>, revoke <player>, audit, pause, resume, network, collectall, remove");
             return true;
         }
         String action = args[0].toLowerCase(Locale.ROOT);
@@ -169,7 +220,7 @@ public final class ForgeGens extends JavaPlugin implements Listener {
         }
         String key = key(block);
         String id = player.getUniqueId().toString();
-        if (args.length == 2 && !Set.of("register", "grant", "revoke").contains(action)) return false;
+        if (args.length == 2 && !Set.of("register", "grant", "revoke", "module").contains(action)) return false;
         if (action.equals("register") || action.equals("remove")) {
             if (!player.hasPermission("forgegens.admin")) {
                 player.sendMessage("Only an administrator can manage forge locations.");
@@ -240,8 +291,12 @@ public final class ForgeGens extends JavaPlugin implements Listener {
         int level = getConfig().getInt(key + ".level");
         int stored = getConfig().getInt(key + ".stored");
         switch (action) {
-            case "status" -> player.sendMessage(type + " | Level " + level + " | " + stored + "/" + (type.capacity * level) + " " + type.output
+            case "status" -> player.sendMessage(type + " | Level " + level + " | " + stored + "/" + (type.capacity * level * module(key).capacityMultiplier) + " " + type.output + " | Module " + module(key)
                 + (getConfig().getBoolean(key + ".paused") ? " | Paused" : ""));
+            case "module" -> {
+                if (args.length == 2) installModule(player, key, args[1], level);
+                else player.sendMessage("Use /forge module <overclock|reservoir>.");
+            }
             case "audit" -> getConfig().getStringList(key + ".audit").forEach(player::sendMessage);
             case "collect" -> {
                 int collected = collect(player, key);

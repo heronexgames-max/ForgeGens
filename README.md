@@ -27,3 +27,16 @@ Production uses persisted timestamps, a twelve-hour catch-up cap and the bluepri
 `/forge network` groups available output by material for forges you own or share within 32 blocks. `/forge collectall` collects from eligible loaded lodestones nearest first and leaves overflow in the original buffers. Both commands work without targeting a block. A forge owner can use `/forge pause` and `/forge resume` while targeting a lodestone. Paused forges keep their buffers and produce no catch-up output while paused.
 
 For a multiplayer demo, give a teammate access to one of two nearby generator types. Compare their network totals with yours, fill their inventory, and verify that a partial collection leaves the rest at the right forge. Restart with one forge paused and compare its production with a running forge.
+
+## Production modules
+
+At level three, an owner can install one permanent module by looking at the lodestone. Existing forges start with an empty module slot.
+
+| Command | Cost | Effect |
+|---|---|---|
+| `/forge module overclock` | 8 redstone blocks | Production cycles take 25% less time |
+| `/forge module reservoir` | 8 copper blocks | Doubles buffer capacity at every level |
+
+Modules work with every blueprint, including during offline production. Installation settles completed production cycles at the old rate before starting the new cycle. Check `/forge status` for the installed module and `/forge audit` for installation history.
+
+For a side-by-side demo, equip two same-level, same-blueprint forges with different modules. Compare their production after 30 seconds and their storage limits in the status output. Try installing a second module, then verify the existing module and inventory both remain intact.
